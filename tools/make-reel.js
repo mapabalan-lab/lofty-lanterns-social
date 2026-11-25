@@ -103,7 +103,7 @@ function setOverlay(html) {
   el.innerHTML = html || '';
 }
 
-const caption = (text, top = 52, size = 34) =>
+const caption = (text, top = 56, size = 46) =>
   `<div style="position:absolute;top:${top}%;left:6%;right:6%;transform:translateY(-50%);font-size:${size}px;line-height:1.1;` +
   `text-shadow:0 3px 0 #2a1747,0 0 18px rgba(0,0,0,.55);-webkit-text-stroke:1.5px #2a1747;letter-spacing:.5px">${text}</div>`;
 
@@ -170,25 +170,25 @@ const REELS = {
   combo: {
     mode: 'free', seeds: [11, 23, 37, 41, 59, 71, 83, 97], search: 2700, clip: 12, endCard: 2.5,
     pick: 'combo',   // end the clip just after the biggest combo chain
-    captions: (len) => [[0, 3.2, caption('wait for the combo…')], [len - 2.6, len, caption('🤯', 52, 64)]],
+    captions: (len) => [[0, 3.2, caption('wait for the combo…')], [len - 2.6, len, caption('🤯', 56, 96)]],
     end: ['A cosy one-thumb merging game', 'Free on the App Store']
   },
   daily: {
     mode: 'daily', date: '2026-12-01', seeds: [5, 17, 29, 43], search: 2400, clip: 11, endCard: 3,
     pick: 'combo',
-    captions: (len) => [[0, 3.5, caption('every day in December<br>everyone gets the same sky')], [3.5, len, caption('how high can you go?', 52, 32)]],
+    captions: (len) => [[0, 3.5, caption('every day in December, everyone gets the same sky', 56, 40)], [3.5, len, caption('how high can you go?')]],
     end: ['The Daily Lantern Run', 'Starts 1 December · free on the App Store']
   },
   moon: {
-    mode: 'free', seeds: [3, 13, 31, 47, 61, 89], search: 4500, clip: 14, endCard: 2.5, speed: 4,
+    mode: 'free', seeds: [3, 13, 31, 47, 61, 89], search: 3600, clip: 15, endCard: 2.5, speed: 8,
     pick: 'whole',   // a sped-up run from the very first spark
-    captions: (len) => [[0, 3, caption('from one tiny spark…')], [len - 3, len, caption('…to this 🌕', 52, 40)]],
+    captions: (len) => [[0, 3, caption('from one tiny spark…')], [len - 3, len, caption('…to this ✨', 56, 54)]],
     end: ['Merge your way to the Moon', 'Free on the App Store']
   }
 };
 
 async function openGame(browser, file, seed, reel) {
-  const ctx = await browser.newContext({ viewport: { width: VW, height: VH }, deviceScaleFactor: DSF, hasTouch: true, isMobile: true });
+  const ctx = await browser.newContext({ viewport: { width: VW, height: VH }, deviceScaleFactor: DSF, hasTouch: true, isMobile: false });
   await ctx.addInitScript(init, seed);
   const page = await ctx.newPage();
   const url = 'file:///' + file.replace(/\\/g, '/') + (reel.date ? '?date=' + reel.date : '');
