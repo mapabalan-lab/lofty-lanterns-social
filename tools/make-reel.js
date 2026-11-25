@@ -79,16 +79,31 @@ function installBot(cfg) {
     if (Math.random() > skill) best = r + Math.random() * (T.W - 2 * r);
     return best + (Math.random() + Math.random() - 1) * 5;
   }
-  const st = { phase: 'wait', n: 0, from: 0, to: 0 };
+  // Played like a person: uneven pauses, now and then a long think, aim that sometimes overshoots and is
+  // pulled back, and a small hold before letting go.
+  const st = { phase: 'wait', n: 0, wait: cfg.wait, from: 0, to: 0, len: 10, legs: [] };
+  const R = (a, b) => a + Math.random() * (b - a);
   window.__bot = () => {
     if (T.state !== 'play' || T.cur === null) { st.phase = 'wait'; st.n = 0; return; }
     if (st.phase === 'wait') {
-      if (++st.n >= cfg.wait) { st.to = chooseAim(cfg.skill); st.from = T.aimX; st.phase = 'aim'; st.n = 0; }
-    } else {
+      if (++st.n >= st.wait) {
+        const to = chooseAim(cfg.skill), from = T.aimX;
+        st.legs = [];
+        if (Math.random() < .3 && Math.abs(to - from) > 30) st.legs.push([to + Math.sign(to - from) * R(10, 28), R(7, 12) | 0]);
+        st.legs.push([to, R(6, 14) | 0]);
+        st.from = from; [st.to, st.len] = st.legs.shift(); st.phase = 'aim'; st.n = 0;
+      }
+    } else if (st.phase === 'aim') {
       st.n++;
-      const k = Math.min(1, st.n / cfg.aim), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      const k = Math.min(1, st.n / st.len), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
       T.aimX = st.from + (st.to - st.from) * e;
-      if (k >= 1) { T.release(); st.phase = 'wait'; st.n = 0; }
+      if (k >= 1) {
+        if (st.legs.length) { st.from = T.aimX; [st.to, st.len] = st.legs.shift(); st.n = 0; }
+        else { st.phase = 'hold'; st.n = 0; st.len = R(1, 6) | 0; }
+      }
+    } else if (++st.n >= st.len) {
+      T.release(); st.phase = 'wait'; st.n = 0;
+      st.wait = Math.random() < .12 ? R(22, 40) | 0 : R(cfg.wait - 5, cfg.wait + 8) | 0;
     }
   };
 }
@@ -103,16 +118,18 @@ function setOverlay(html) {
   el.innerHTML = html || '';
 }
 
-const caption = (text, top = 56, size = 46) =>
-  `<div style="position:absolute;top:${top}%;left:6%;right:6%;transform:translateY(-50%);font-size:${size}px;line-height:1.1;` +
-  `text-shadow:0 3px 0 #2a1747,0 0 18px rgba(0,0,0,.55);-webkit-text-stroke:1.5px #2a1747;letter-spacing:.5px">${text}</div>`;
+// Plain text on a dark box, the way people caption Reels in the Instagram editor
+const caption = (text, top = 46, size = 24) =>
+  `<div style="position:absolute;top:${top}%;left:0;right:0;transform:translateY(-50%);display:flex;justify-content:center">` +
+  `<span style="font-family:Figtree,system-ui;font-weight:700;font-size:${size}px;line-height:1.25;color:#fff;background:rgba(0,0,0,.62);` +
+  `padding:5px 11px;border-radius:7px;max-width:78%">${text}</span></div>`;
 
 function endCard(iconUri, line1, line2) {
-  return `<div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 38%,#3b2470 0%,#1a1033 60%,#0f0a22 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px">` +
-    `<img src="${iconUri}" style="width:150px;height:150px;border-radius:34px;box-shadow:0 0 60px rgba(255,190,90,.45)">` +
-    `<div style="font-size:44px;color:#ffd27a;text-shadow:0 0 22px rgba(255,190,90,.5)">Lofty Lanterns</div>` +
-    `<div style="font-family:Figtree,system-ui;font-weight:700;font-size:21px;color:#e9ddff;max-width:80%">${line1}</div>` +
-    `<div style="font-family:Figtree,system-ui;font-weight:500;font-size:17px;color:#bfaee6;margin-top:6px">${line2}</div></div>`;
+  return `<div style="position:absolute;inset:0;background:#140e26;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px">` +
+    `<img src="${iconUri}" style="width:112px;height:112px;border-radius:25px">` +
+    `<div style="font-size:34px;color:#ffd27a">Lofty Lanterns</div>` +
+    `<div style="font-family:Figtree,system-ui;font-weight:500;font-size:17px;color:#d8ccf2;max-width:80%">${line1}</div>` +
+    (line2 ? `<div style="font-family:Figtree,system-ui;font-weight:500;font-size:15px;color:#a99bd0">${line2}</div>` : '') + `</div>`;
 }
 
 // ---- sound: the game's blip() recipe, rendered offline ----
@@ -144,12 +161,18 @@ function music(SR, n, seconds, gameEnd) {
     // bass: root on 1, fifth-ish pickup on the "and" of 3
     tone(t0, hz(c[4]), beat * 2, .16, .5, [1, .35, .1]);
     tone(t0 + beat * 2.5, hz(c[4] + 7), beat * 1.4, .1, .35, [1, .3]);
-    // chime arpeggio in eighths, an octave up, a little swing and a few rests
-    const pat = [0, 1, 2, 3, 2, 1, 3, 2];
+    // electric piano (two-operator FM, like a Rhodes): a different broken-chord figure each bar, swung,
+    // played a touch early or late with uneven velocity
+    const figs = [[0, 2, 3, 2, null, 1, 3, null], [0, null, 2, 3, 1, null, 2, 3], [3, 2, 0, null, 2, 1, null, 3], [0, 1, null, 2, 3, null, 2, null]];
+    const fig = figs[(b * 3 + (rnd() * 2 | 0)) % 4];
     for (let k = 0; k < 8; k++) {
-      if (b > 0 && rnd() < .12) continue;
-      const tt = t0 + k * beat / 2 + (k % 2 ? beat * .06 : 0);
-      tone(tt, hz(c[pat[k]] + 12), .9, .05 + rnd() * .02, .32, [1, .28, .08]);
+      if (fig[k] === null) continue;
+      const tt = t0 + k * beat / 2 + (k % 2 ? beat * .09 : 0) + (rnd() - .5) * .022;
+      const f = hz(c[fig[k]] + 12), vel = .045 + rnd() * .035;
+      add(tt, 1.3, t => {
+        const env = Math.min(1, t / .004) * Math.exp(-t / .55), idx = 1.6 * Math.exp(-t / .18);
+        return vel * env * Math.sin(2 * Math.PI * f * t + idx * Math.sin(2 * Math.PI * f * t) + .3 * Math.sin(2 * Math.PI * 7 * t) * .01);
+      });
     }
     if (b === 0) continue;
     // drums: kick on 1 and 3 (+ a ghost before 3), soft clap on 2 and 4, hats on the offbeats
@@ -160,8 +183,15 @@ function music(SR, n, seconds, gameEnd) {
   // final chord rings out over the end card
   for (const m of CH[0].slice(0, 4)) tone(end, hz(m + 12), Math.max(.1, seconds - end), .045, 1.1, [1, .25]);
   tone(end, hz(CH[0][4]), Math.max(.1, seconds - end), .14, .9, [1, .3]);
-  // gentle fade in and out
-  for (let i = 0; i < n; i++) { const t = i / SR; out[i] *= Math.min(1, t / .25, (seconds - t) / .6); }
+  // tape: a soft high cut, slow wobble in level, and a faint bed of hiss and dust crackle
+  let lp = 0, hiss = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / SR;
+    lp += (out[i] - lp) * .35;
+    hiss += ((rnd() * 2 - 1) - hiss) * .2;
+    const dust = rnd() < .00012 ? (rnd() - .5) * .06 : 0;
+    out[i] = (lp * (1 + .03 * Math.sin(2 * Math.PI * .6 * t)) + hiss * .004 + dust) * Math.min(1, t / .25, (seconds - t) / .6);
+  }
   return out;
 }
 
@@ -217,20 +247,20 @@ const REELS = {
   combo: {
     mode: 'free', seeds: [11, 23, 37, 41, 59, 71, 83, 97], search: 2700, clip: 12, endCard: 2.5,
     pick: 'combo',   // end the clip just after the biggest combo chain
-    captions: (len) => [[0, 3.2, caption('wait for the combo…')], [len - 2.6, len, caption('🤯', 56, 96)]],
-    end: ['A cosy one-thumb merging game', 'Free on the App Store']
+    captions: (len) => [[0, 4, caption('wait for it')]],
+    end: ['Free on iPhone', '']
   },
   daily: {
     mode: 'daily', date: '2026-12-01', seeds: [5, 17, 29, 43], search: 2400, clip: 11, endCard: 3,
     pick: 'combo',
-    captions: (len) => [[0, 3.5, caption('every day in December, everyone gets the same sky', 56, 40)], [3.5, len, caption('how high can you go?')]],
-    end: ['The Daily Lantern Run', 'Starts 1 December · free on the App Store']
+    captions: (len) => [[0, 4.5, caption('the daily run: same sky for everyone, new one each day')]],
+    end: ['Daily Lantern Run, all December', 'Free on iPhone']
   },
   moon: {
     mode: 'free', seeds: [3, 13, 31, 47, 61, 89], search: 3600, clip: 15, endCard: 2.5, speed: 8,
     pick: 'whole',   // a sped-up run from the very first spark
-    captions: (len) => [[0, 3, caption('from one tiny spark…')], [len - 3, len, caption('…to this ✨', 56, 54)]],
-    end: ['Merge your way to the Moon', 'Free on the App Store']
+    captions: (len) => [[0, 3.5, caption('2 minutes of play at 8x speed')]],
+    end: ['Free on iPhone', '']
   }
 };
 
