@@ -1,0 +1,282 @@
+// Records vertical 1080x1920 Instagram Reels of Lofty Lanterns being played by a bot.
+// The real game (lantern-rise.html from the game repo) runs in headless Edge with its clock, random numbers and
+// animation frames under our control, so a run can be searched quickly and then replayed frame by frame for capture.
+// Sound is rebuilt from the game's own sound recipe (sfx calls are logged and synthesised here).
+// usage: node make-reel.js <reel-name>        (reels are defined in REELS below)
+const { chromium } = require('playwright-core');
+const ffmpeg = require('ffmpeg-static');
+const fs = require('fs'), path = require('path'), os = require('os');
+const { execFileSync } = require('child_process');
+
+const GAME = process.env.GAME_HTML || 'C:/Users/mapab/Latern Rise/lantern-rise.html';
+const ICON = process.env.GAME_ICON || 'C:/Users/mapab/Latern Rise/assets/icon-only.png';
+const OUT = path.join(__dirname, '..', 'lofty-lanterns', 'reels');
+const FPS = 30, VW = 390, VH = 693, DSF = 1080 / 390;
+
+function gameHtml(dir) {
+  let src = fs.readFileSync(GAME, 'utf8');
+  const hook = `
+  window.__T = { startRun, release, TIERS, W, DT, G, DRAG, LAST, liftAt,
+    get state() { return state; }, get bodies() { return bodies; }, get blocks() { return blocks; }, get cur() { return cur; },
+    get score() { return score; }, get combo() { return combo; }, get H() { return H; }, get launchY() { return launchY; },
+    get windAx() { return windAx; }, get aimX() { return aimX; }, set aimX(v) { aimX = v; }, get topTier() { return topTier; } };
+  for (const k of Object.keys(sfx)) { const f = sfx[k]; sfx[k] = (...a) => { (window.__sfx = window.__sfx || []).push([window.__vt, k, a]); return f(...a); }; }
+`;
+  const end = src.lastIndexOf('})();');
+  src = src.slice(0, end) + hook + src.slice(end);
+  const file = path.join(dir, 'game.html');
+  fs.writeFileSync(file, src);
+  return file;
+}
+
+// runs in the page before the game: seeded Math.random, and animation frames that only advance when we say so
+function init(seed) {
+  let s = seed >>> 0;
+  Math.random = () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  window.__q = []; window.__ts = 0; window.__vt = 0;
+  window.requestAnimationFrame = cb => { window.__q.push(cb); return window.__q.length; };
+  window.cancelAnimationFrame = () => {};
+  window.__tick = (n = 1) => {
+    for (let i = 0; i < n; i++) {
+      window.__ts += 1000 / 30; window.__vt = window.__ts / 1000;
+      const q = window.__q; window.__q = [];
+      for (const cb of q) cb(window.__ts);
+      if (window.__bot) window.__bot();
+    }
+  };
+}
+
+// the bot from tuning/sim.js, plus a visible, eased aim before each launch
+function installBot(cfg) {
+  const T = window.__T;
+  function land(x, r) {
+    let px = x, py = T.launchY, vx = 0, vy = -260 * T.DT;
+    const wind = T.windAx * T.DT * T.DT, g = T.G * T.DT * T.DT;
+    for (let i = 0; i < 400; i++) {
+      vx = vx * T.DRAG + wind; vy = vy * T.DRAG + g * T.liftAt(px);
+      const sp = Math.hypot(vx, vy); if (sp > 11) { vx *= 11 / sp; vy *= 11 / sp; }
+      px = Math.max(r, Math.min(T.W - r, px + vx)); py += vy;
+      if (py <= r) return { y: r, hit: null };
+      for (const b of T.bodies) { const dx = b.x - px, dy = b.y - py, m = b.r + r; if (dx * dx + dy * dy < m * m) return { y: py, hit: b }; }
+      for (const k of T.blocks) { if (k.on === false) continue; const dx = k.x - px, dy = k.y - py, m = k.r + r; if (dx * dx + dy * dy < m * m) return { y: py, hit: null, cloud: true }; }
+    }
+    return { y: py, hit: null };
+  }
+  function chooseAim(skill) {
+    const c = T.cur, r = T.TIERS[c].r;
+    let best = T.W / 2, bestS = -1e9;
+    for (let x = r; x <= T.W - r; x += 6) {
+      const res = land(x, r);
+      let s = -res.y * 0.004;
+      if (res.hit) {
+        const d = res.hit.tier - c;
+        if (d === 0 && res.hit.ice) s += .5;
+        else if (d === 0) s += 10 + c * .5; else if (d === 1) s += 1.5; else if (d === -1) s += .8;
+        else if (d <= -2) s -= Math.min(3, -d); else s -= .3 * d;
+      } else if (res.cloud) s -= .5;
+      if (s > bestS) { bestS = s; best = x; }
+    }
+    if (Math.random() > skill) best = r + Math.random() * (T.W - 2 * r);
+    return best + (Math.random() + Math.random() - 1) * 5;
+  }
+  const st = { phase: 'wait', n: 0, from: 0, to: 0 };
+  window.__bot = () => {
+    if (T.state !== 'play' || T.cur === null) { st.phase = 'wait'; st.n = 0; return; }
+    if (st.phase === 'wait') {
+      if (++st.n >= cfg.wait) { st.to = chooseAim(cfg.skill); st.from = T.aimX; st.phase = 'aim'; st.n = 0; }
+    } else {
+      st.n++;
+      const k = Math.min(1, st.n / cfg.aim), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      T.aimX = st.from + (st.to - st.from) * e;
+      if (k >= 1) { T.release(); st.phase = 'wait'; st.n = 0; }
+    }
+  };
+}
+
+function setOverlay(html) {
+  let el = document.getElementById('reelOverlay');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'reelOverlay';
+    el.style.cssText = 'position:fixed;inset:0;z-index:99999;pointer-events:none;display:flex;flex-direction:column;align-items:center;font-family:"Lilita One",system-ui;color:#fff;text-align:center;';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = html || '';
+}
+
+const caption = (text, top = 52, size = 34) =>
+  `<div style="position:absolute;top:${top}%;left:6%;right:6%;transform:translateY(-50%);font-size:${size}px;line-height:1.1;` +
+  `text-shadow:0 3px 0 #2a1747,0 0 18px rgba(0,0,0,.55);-webkit-text-stroke:1.5px #2a1747;letter-spacing:.5px">${text}</div>`;
+
+function endCard(iconUri, line1, line2) {
+  return `<div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 38%,#3b2470 0%,#1a1033 60%,#0f0a22 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px">` +
+    `<img src="${iconUri}" style="width:150px;height:150px;border-radius:34px;box-shadow:0 0 60px rgba(255,190,90,.45)">` +
+    `<div style="font-size:44px;color:#ffd27a;text-shadow:0 0 22px rgba(255,190,90,.5)">Lofty Lanterns</div>` +
+    `<div style="font-family:Figtree,system-ui;font-weight:700;font-size:21px;color:#e9ddff;max-width:80%">${line1}</div>` +
+    `<div style="font-family:Figtree,system-ui;font-weight:500;font-size:17px;color:#bfaee6;margin-top:6px">${line2}</div></div>`;
+}
+
+// ---- sound: the game's blip() recipe, rendered offline ----
+const NOTES = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26, 28];
+function renderAudio(events, seconds) {
+  const SR = 44100, n = Math.ceil(seconds * SR), buf = new Float32Array(n);
+  const wave = (type, ph) => type === 'sine' ? Math.sin(ph) : type === 'triangle' ? 2 / Math.PI * Math.asin(Math.sin(ph)) : Math.sign(Math.sin(ph));
+  function blip(t0, f, dur, type, vol, slideTo) {
+    const i0 = Math.floor(t0 * SR), len = Math.floor((dur + .02) * SR);
+    let ph = 0;
+    for (let i = 0; i < len && i0 + i < n; i++) {
+      const t = i / SR, k = Math.min(1, t / dur);
+      const fr = slideTo ? f * (slideTo / f) ** k : f;
+      ph += 2 * Math.PI * fr / SR;
+      const gain = vol * (.0001 / vol) ** k, att = Math.min(1, t / .004);
+      if (i0 + i >= 0) buf[i0 + i] += wave(type, ph) * gain * att;
+    }
+  }
+  function noise(t0) {
+    const i0 = Math.floor(t0 * SR), len = Math.floor(.6 * SR); let lp = 0, bp = 0;
+    for (let i = 0; i < len && i0 + i < n; i++) {
+      const t = i / SR, x = Math.random() * 2 - 1; lp += (x - lp) * .25; bp += (lp - bp) * .08;
+      const env = t < .15 ? .0001 * (.18 / .0001) ** (t / .15) : .18 * (.0001 / .18) ** ((t - .15) / .45);
+      buf[i0 + i] += (lp - bp) * env * 3;
+    }
+  }
+  const S = {
+    drop: t => blip(t, 240, .12, 'sine', .12, 150),
+    merge: (t, tier, c) => { const f = 330 * 2 ** (NOTES[Math.min(NOTES.length - 1, tier + c - 1)] / 12); blip(t, f, .5, 'sine', .16); blip(t, f * 2, .3, 'triangle', .05); },
+    gust: t => noise(t),
+    sweep: t => blip(t, 900, .25, 'triangle', .1, 300),
+    wish: t => blip(t, 520, .3, 'sine', .12, 1040),
+    coin: t => { blip(t, 880, .09, 'triangle', .1); blip(t + .07, 1320, .14, 'triangle', .1); },
+    win: t => [523, 659, 784, 1047].forEach((f, i) => blip(t + i * .11, f, .45, 'triangle', .12)),
+    over: t => [392, 330, 262].forEach((f, i) => blip(t + i * .17, f, .5, 'triangle', .12))
+  };
+  for (const [t, k, a] of events) if (S[k]) S[k](t, ...(a || []));
+  // a quiet warm pad underneath so the clip never sits in silence
+  for (let i = 0; i < n; i++) {
+    const t = i / SR, fade = Math.min(1, t / 1.5, (seconds - t) / 1.5);
+    buf[i] += .018 * fade * (Math.sin(2 * Math.PI * 110 * t) + .7 * Math.sin(2 * Math.PI * 164.8 * t) + .5 * Math.sin(2 * Math.PI * 220.5 * t));
+  }
+  let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v));
+  const gain = peak > 0 ? .8 / peak : 1;
+  const wav = Buffer.alloc(44 + n * 2);
+  wav.write('RIFF', 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write('WAVE', 8); wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(SR, 24);
+  wav.writeUInt32LE(SR * 2, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) wav.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(buf[i] * gain * 32767))), 44 + i * 2);
+  return wav;
+}
+
+// ---- reels ----
+const REELS = {
+  combo: {
+    mode: 'free', seeds: [11, 23, 37, 41, 59, 71, 83, 97], search: 2700, clip: 12, endCard: 2.5,
+    pick: 'combo',   // end the clip just after the biggest combo chain
+    captions: (len) => [[0, 3.2, caption('wait for the combo…')], [len - 2.6, len, caption('🤯', 52, 64)]],
+    end: ['A cosy one-thumb merging game', 'Free on the App Store']
+  },
+  daily: {
+    mode: 'daily', date: '2026-12-01', seeds: [5, 17, 29, 43], search: 2400, clip: 11, endCard: 3,
+    pick: 'combo',
+    captions: (len) => [[0, 3.5, caption('every day in December<br>everyone gets the same sky')], [3.5, len, caption('how high can you go?', 52, 32)]],
+    end: ['The Daily Lantern Run', 'Starts 1 December · free on the App Store']
+  },
+  moon: {
+    mode: 'free', seeds: [3, 13, 31, 47, 61, 89], search: 4500, clip: 14, endCard: 2.5, speed: 4,
+    pick: 'whole',   // a sped-up run from the very first spark
+    captions: (len) => [[0, 3, caption('from one tiny spark…')], [len - 3, len, caption('…to this 🌕', 52, 40)]],
+    end: ['Merge your way to the Moon', 'Free on the App Store']
+  }
+};
+
+async function openGame(browser, file, seed, reel) {
+  const ctx = await browser.newContext({ viewport: { width: VW, height: VH }, deviceScaleFactor: DSF, hasTouch: true, isMobile: true });
+  await ctx.addInitScript(init, seed);
+  const page = await ctx.newPage();
+  const url = 'file:///' + file.replace(/\\/g, '/') + (reel.date ? '?date=' + reel.date : '');
+  await page.goto(url);
+  await page.waitForFunction(() => window.__T && document.fonts && document.fonts.status === 'loaded', null, { timeout: 20000 });
+  await page.evaluate(installBot, { skill: .97, wait: 13, aim: 10 });
+  await page.evaluate(m => { window.__T.startRun(m); window.__sfx = []; }, reel.mode);
+  return { ctx, page };
+}
+
+async function main() {
+  const name = process.argv[2];
+  const reel = REELS[name];
+  if (!reel) throw new Error('reel name: ' + Object.keys(REELS).join(', '));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-'));
+  const file = gameHtml(tmp);
+  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  const speed = reel.speed || 1;
+
+  // 1. search: play each seed quickly and find the best moment
+  let best = null;
+  for (const seed of reel.seeds) {
+    const { ctx, page } = await openGame(browser, file, seed, reel);
+    let f = 0;
+    while (f < reel.search) {
+      await page.evaluate(() => window.__tick(150)); f += 150;
+      if (await page.evaluate(() => window.__T.state !== 'play')) break;
+    }
+    const log = await page.evaluate(() => window.__sfx);
+    const top = await page.evaluate(() => window.__T.topTier);
+    await ctx.close();
+    if (reel.pick === 'whole') {
+      const dur = Math.min(f / FPS, reel.clip * speed);
+      const s = top * 100 + dur;
+      console.log(`seed ${seed}: top tier ${top}, ${Math.round(f / FPS)}s`);
+      if (!best || s > best.score) best = { seed, start: 0, score: s };
+      continue;
+    }
+    const merges = log.filter(e => e[1] === 'merge');
+    for (const [t, , [tier, c]] of merges) {
+      const s = c * 10 + tier;
+      if (t < reel.clip - 2) continue;
+      if (!best || s > best.score) best = { seed, start: t + 1.6 - reel.clip, score: s, combo: c, tier };
+    }
+    console.log(`seed ${seed}: best combo so far ${best ? best.combo : '-'} (top tier ${top})`);
+  }
+  console.log('chosen', best);
+
+  // 2. replay the chosen run and capture it
+  const frames = path.join(tmp, 'frames'); fs.mkdirSync(frames);
+  const { ctx, page } = await openGame(browser, file, best.seed, reel);
+  const skip = Math.round(best.start * FPS);
+  for (let left = skip; left > 0; left -= 300) await page.evaluate(n => window.__tick(n), Math.min(300, left));
+  await page.evaluate(() => { window.__sfx = []; window.__clip0 = window.__vt; });
+  const total = Math.round(reel.clip * FPS), caps = reel.captions(reel.clip);
+  let shown = null, idx = 0;
+  for (let i = 0; i < total; i++) {
+    const t = i / FPS, cap = caps.find(c => t >= c[0] && t < c[1]);
+    const html = cap ? cap[2] : '';
+    if (html !== shown) { await page.evaluate(setOverlay, html); shown = html; }
+    await page.screenshot({ path: path.join(frames, String(idx++).padStart(5, '0') + '.jpg'), type: 'jpeg', quality: 92 });
+    await page.evaluate(n => window.__tick(n), speed);
+  }
+  const log = await page.evaluate(() => window.__sfx.map(e => [e[0] - window.__clip0, e[1], e[2]]));
+  // end card
+  const iconUri = 'data:image/png;base64,' + fs.readFileSync(ICON).toString('base64');
+  await page.evaluate(setOverlay, endCard(iconUri, ...reel.end));
+  await page.waitForTimeout(300);
+  const card = path.join(tmp, 'card.jpg');
+  await page.screenshot({ path: card, type: 'jpeg', quality: 92 });
+  for (let i = 0; i < Math.round(reel.endCard * FPS); i++) fs.copyFileSync(card, path.join(frames, String(idx++).padStart(5, '0') + '.jpg'));
+  await ctx.close(); await browser.close();
+
+  // 3. sound and encode
+  const seconds = idx / FPS;
+  // a sped-up clip keeps only the merges (drops would be a machine-gun rattle), squeezed onto the faster clock
+  const events = speed > 1 ? log.filter(e => e[1] === 'merge').map(e => [e[0] / speed, e[1], e[2]]) : log;
+  events.push([reel.clip + .15, 'win', []]);
+  const wav = path.join(tmp, 'audio.wav');
+  fs.writeFileSync(wav, renderAudio(events, seconds));
+  fs.mkdirSync(OUT, { recursive: true });
+  const mp4 = path.join(OUT, name + '.mp4');
+  execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-framerate', String(FPS), '-i', path.join(frames, '%05d.jpg'), '-i', wav,
+    '-vf', 'scale=1080:1920:flags=lanczos,format=yuv420p', '-c:v', 'libx264', '-profile:v', 'high', '-preset', 'slow', '-crf', '18',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest', '-movflags', '+faststart', mp4]);
+  // a cover frame for review
+  fs.copyFileSync(path.join(frames, String(Math.round(total * .85)).padStart(5, '0') + '.jpg'), path.join(OUT, name + '-cover.jpg'));
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log('wrote', mp4, seconds.toFixed(1) + 's');
+}
+main().catch(e => { console.error(e); process.exit(1); });
