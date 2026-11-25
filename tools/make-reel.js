@@ -117,7 +117,55 @@ function endCard(iconUri, line1, line2) {
 
 // ---- sound: the game's blip() recipe, rendered offline ----
 const NOTES = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24, 26, 28];
-function renderAudio(events, seconds) {
+// A cosy lo-fi loop written for these clips (no samples, nothing licensed): E major, 84 bpm,
+// Emaj7 - C#m7 - Amaj7 - B6, chime arpeggio, pad, round bass and soft drums. Drums enter on bar 2;
+// at gameEnd the band stops and the last chord rings out under the end card.
+function music(SR, n, seconds, gameEnd) {
+  const out = new Float32Array(n), beat = 60 / 84, bar = beat * 4;
+  const hz = m => 440 * 2 ** ((m - 69) / 12);
+  const CH = [[52, 56, 59, 63, 40], [49, 52, 56, 59, 37], [57, 61, 64, 68, 45], [47, 51, 54, 56, 47]];
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const add = (t0, len, fn) => { const i0 = Math.max(0, Math.floor(t0 * SR)); for (let i = 0; i < len * SR && i0 + i < n; i++) out[i0 + i] += fn(i / SR); };
+  const tone = (t0, f, len, vol, decay, harm = [1]) => add(t0, len, t => {
+    const env = Math.min(1, t / .006) * Math.exp(-t / decay);
+    let s = 0; harm.forEach((h, k) => { s += h * Math.sin(2 * Math.PI * f * (k + 1) * t); }); return s * env * vol;
+  });
+  const noise = (t0, len, vol, decay, bright) => { let lp = 0, prev = 0; add(t0, len, t => {
+    const x = rnd() * 2 - 1; lp += (x - lp) * bright; const hp = lp - prev; prev = lp; return hp * Math.exp(-t / decay) * vol; }); };
+  const end = Math.min(gameEnd, seconds);
+  const bars = Math.ceil(end / bar);
+  for (let b = 0; b < bars; b++) {
+    const t0 = b * bar, c = CH[b % 4];
+    // pad: slow swell over the bar
+    for (const m of c.slice(0, 4)) add(t0, bar + .3, t => {
+      const env = Math.min(1, t / .5) * Math.min(1, (bar + .3 - t) / .4);
+      return .022 * env * (Math.sin(2 * Math.PI * hz(m) * t) + .25 * Math.sin(2 * Math.PI * hz(m) * 2.003 * t)) * (1 + .15 * Math.sin(2 * Math.PI * 3 * t));
+    });
+    // bass: root on 1, fifth-ish pickup on the "and" of 3
+    tone(t0, hz(c[4]), beat * 2, .16, .5, [1, .35, .1]);
+    tone(t0 + beat * 2.5, hz(c[4] + 7), beat * 1.4, .1, .35, [1, .3]);
+    // chime arpeggio in eighths, an octave up, a little swing and a few rests
+    const pat = [0, 1, 2, 3, 2, 1, 3, 2];
+    for (let k = 0; k < 8; k++) {
+      if (b > 0 && rnd() < .12) continue;
+      const tt = t0 + k * beat / 2 + (k % 2 ? beat * .06 : 0);
+      tone(tt, hz(c[pat[k]] + 12), .9, .05 + rnd() * .02, .32, [1, .28, .08]);
+    }
+    if (b === 0) continue;
+    // drums: kick on 1 and 3 (+ a ghost before 3), soft clap on 2 and 4, hats on the offbeats
+    for (const kb of [0, 2, b % 2 ? 1.75 : null]) if (kb !== null) add(t0 + kb * beat, .3, t => Math.sin(2 * Math.PI * (45 * t + 75 * .045 * (1 - Math.exp(-t / .045)))) * Math.exp(-t / .16) * (kb === 1.75 ? .18 : .34));
+    for (const cb of [1, 3]) noise(t0 + cb * beat, .2, .06, .05, .18);
+    for (let h = 0; h < 8; h++) if (h % 2) noise(t0 + h * beat / 2 + beat * .06, .05, .022, .012, .6);
+  }
+  // final chord rings out over the end card
+  for (const m of CH[0].slice(0, 4)) tone(end, hz(m + 12), Math.max(.1, seconds - end), .045, 1.1, [1, .25]);
+  tone(end, hz(CH[0][4]), Math.max(.1, seconds - end), .14, .9, [1, .3]);
+  // gentle fade in and out
+  for (let i = 0; i < n; i++) { const t = i / SR; out[i] *= Math.min(1, t / .25, (seconds - t) / .6); }
+  return out;
+}
+
+function renderAudio(events, seconds, gameEnd = seconds) {
   const SR = 44100, n = Math.ceil(seconds * SR), buf = new Float32Array(n);
   const wave = (type, ph) => type === 'sine' ? Math.sin(ph) : type === 'triangle' ? 2 / Math.PI * Math.asin(Math.sin(ph)) : Math.sign(Math.sin(ph));
   function blip(t0, f, dur, type, vol, slideTo) {
@@ -150,13 +198,12 @@ function renderAudio(events, seconds) {
     over: t => [392, 330, 262].forEach((f, i) => blip(t + i * .17, f, .5, 'triangle', .12))
   };
   for (const [t, k, a] of events) if (S[k]) S[k](t, ...(a || []));
-  // a quiet warm pad underneath so the clip never sits in silence
-  for (let i = 0; i < n; i++) {
-    const t = i / SR, fade = Math.min(1, t / 1.5, (seconds - t) / 1.5);
-    buf[i] += .018 * fade * (Math.sin(2 * Math.PI * 110 * t) + .7 * Math.sin(2 * Math.PI * 164.8 * t) + .5 * Math.sin(2 * Math.PI * 220.5 * t));
-  }
+  // sound effects sit under the music
+  let sp = 0; for (const v of buf) sp = Math.max(sp, Math.abs(v));
+  const mus = music(SR, n, seconds, gameEnd);
+  for (let i = 0; i < n; i++) buf[i] = mus[i] + (sp ? buf[i] / sp * .45 : 0);
   let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v));
-  const gain = peak > 0 ? .8 / peak : 1;
+  const gain = peak > 0 ? .85 / peak : 1;
   const wav = Buffer.alloc(44 + n * 2);
   wav.write('RIFF', 0); wav.writeUInt32LE(36 + n * 2, 4); wav.write('WAVE', 8); wav.write('fmt ', 12);
   wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(SR, 24);
@@ -204,6 +251,16 @@ async function main() {
   const reel = REELS[name];
   if (!reel) throw new Error('reel name: ' + Object.keys(REELS).join(', '));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reel-'));
+  // --audio: keep the recorded picture and only rebuild the sound from the saved sound events
+  if (process.argv.includes('--audio')) {
+    const mp4 = path.join(OUT, name + '.mp4'), snd = JSON.parse(fs.readFileSync(path.join(OUT, name + '.sound.json'), 'utf8'));
+    const wav = path.join(tmp, 'audio.wav'), out = path.join(tmp, 'out.mp4');
+    fs.writeFileSync(wav, renderAudio(snd.events, snd.seconds, snd.gameEnd));
+    execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-i', mp4, '-i', wav, '-map', '0:v', '-map', '1:a', '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest', '-movflags', '+faststart', out]);
+    fs.copyFileSync(out, mp4); fs.rmSync(tmp, { recursive: true, force: true });
+    return console.log('new sound for', mp4);
+  }
   const file = gameHtml(tmp);
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const speed = reel.speed || 1;
@@ -268,8 +325,9 @@ async function main() {
   const events = speed > 1 ? log.filter(e => e[1] === 'merge').map(e => [e[0] / speed, e[1], e[2]]) : log;
   events.push([reel.clip + .15, 'win', []]);
   const wav = path.join(tmp, 'audio.wav');
-  fs.writeFileSync(wav, renderAudio(events, seconds));
+  fs.writeFileSync(wav, renderAudio(events, seconds, reel.clip));
   fs.mkdirSync(OUT, { recursive: true });
+  fs.writeFileSync(path.join(OUT, name + '.sound.json'), JSON.stringify({ seconds, gameEnd: reel.clip, events }));
   const mp4 = path.join(OUT, name + '.mp4');
   execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-framerate', String(FPS), '-i', path.join(frames, '%05d.jpg'), '-i', wav,
     '-vf', 'scale=1080:1920:flags=lanczos,format=yuv420p', '-c:v', 'libx264', '-profile:v', 'high', '-preset', 'slow', '-crf', '18',
